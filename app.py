@@ -1,5 +1,6 @@
+import customtkinter as ctk
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox
 import speech_recognition as sr
 import sounddevice as sd
 try:
@@ -12,6 +13,9 @@ try:
 except ImportError:
     av = None
 
+import sys
+import os
+import json
 import threading
 import asyncio
 import time
@@ -19,16 +23,43 @@ import re
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
-class RealtimeVoiceChanger:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Low-Latency Real-Time Voice Changer")
-        self.root.geometry("540x600")
-        self.root.minsize(500, 550)
-        
+# Lokasi File Konfigurasi Lokal (Aman untuk Script biasa maupun file .EXE)
+if getattr(sys, 'frozen', False):
+    # Jika berjalan sebagai file .EXE terkompilasi, simpan di folder file .EXE berada
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # Jika berjalan sebagai script Python biasa
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+
+# Konfigurasi Tema Anti-Slop Modern Dark Mode
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
+
+# Skema Warna Premium
+COLOR_BG = "#0d0f17"          # Obsidian deep background
+COLOR_CARD = "#171a26"        # Elevated slate card
+COLOR_CARD_BORDER = "#25293d" # Subtle border
+COLOR_TEXT_MAIN = "#f1f5f9"   # Bright white
+COLOR_TEXT_MUTED = "#94a3b8"  # Slate muted
+COLOR_PRIMARY = "#4f46e5"     # Electric indigo
+COLOR_PRIMARY_HOVER = "#4338ca"
+COLOR_DANGER = "#e11d48"      # Rose red
+COLOR_DANGER_HOVER = "#be123c"
+
+class RealtimeVoiceChanger(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("speech2google")
+        self.geometry("700x780")
+        self.minsize(640, 700)
+        self.configure(fg_color=COLOR_BG)
+
         self.is_running = False
         self.worker_thread = None
-        
+
         # Daftar suara Edge-TTS yang tersedia
         self.voices = {
             "Gadis (Wanita - Indonesia)": "id-ID-GadisNeural",
@@ -36,175 +67,462 @@ class RealtimeVoiceChanger:
             "Jenny (Female - English US)": "en-US-JennyNeural",
             "Guy (Male - English US)": "en-US-GuyNeural"
         }
-        
-        # Mengambil daftar perangkat audio dari sounddevice (PortAudio)
+
+        # Mengambil daftar perangkat audio dari sounddevice
         self.devices = sd.query_devices()
+        self.mic_list = self.get_device_names(is_input=True)
+        self.speaker_list = self.get_device_names(is_input=False)
+
+        # Inisialisasi tema dark untuk dropdown combobox
+        self.setup_combobox_theme()
         
+        # Muat konfigurasi lokal yang tersimpan
+        self.saved_config = self.load_config()
+
         self.setup_ui()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.apply_saved_config()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def load_config(self):
+        """Memuat preferensi yang tersimpan dari config.json"""
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Gagal memuat config: {e}")
+        return {}
+
+    def save_config(self):
+        """Menyimpan seluruh pengaturan aktif ke config.json secara otomatis"""
+        try:
+            mic_val = self.mic_cb.get()
+            speaker_val = self.speaker_cb.get()
+
+            # Ekstrak nama perangkat tanpa prefix ID agar tetap cocok bila ID berubah
+            mic_name = mic_val.split(":", 1)[1].strip() if ":" in mic_val else mic_val
+            speaker_name = speaker_val.split(":", 1)[1].strip() if ":" in speaker_val else speaker_val
+
+            cfg = {
+                "mic": mic_name,
+                "speaker": speaker_name,
+                "voice": self.voice_opt.get(),
+                "rate": self.rate_opt.get(),
+                "pause_threshold": self.pause_opt.get(),
+                "auto_comma": self.auto_comma_var.get()
+            }
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"Gagal menyimpan config: {e}")
+
+    def apply_saved_config(self):
+        """Menerapkan konfigurasi yang tersimpan ke tampilan GUI saat aplikasi dibuka"""
+        if not self.saved_config:
+            return
+
+        # 1. Pulihkan Mikrofon Input
+        saved_mic = self.saved_config.get("mic", "")
+        if saved_mic:
+            matched = False
+            for idx, item in enumerate(self.mic_list):
+                if saved_mic.lower() in item.lower():
+                    self.mic_cb.current(idx)
+                    matched = True
+                    break
+            if not matched:
+                self.set_default_device(self.mic_cb, is_input=True)
+
+        # 2. Pulihkan Speaker Output
+        saved_speaker = self.saved_config.get("speaker", "")
+        if saved_speaker:
+            matched = False
+            for idx, item in enumerate(self.speaker_list):
+                if saved_speaker.lower() in item.lower():
+                    self.speaker_cb.current(idx)
+                    matched = True
+                    break
+            if not matched:
+                self.set_default_device(self.speaker_cb, is_input=False)
+
+        # 3. Pulihkan Karakter Suara Edge-TTS
+        saved_voice = self.saved_config.get("voice", "")
+        if saved_voice in self.voices:
+            self.voice_opt.set(saved_voice)
+
+        # 4. Pulihkan Kecepatan
+        saved_rate = self.saved_config.get("rate", "")
+        if saved_rate:
+            self.rate_opt.set(saved_rate)
+
+        # 5. Pulihkan Jeda Hening
+        saved_pause = self.saved_config.get("pause_threshold", "")
+        if saved_pause:
+            self.pause_opt.set(saved_pause)
+
+        # 6. Pulihkan Opsi Auto-Koma
+        if "auto_comma" in self.saved_config:
+            self.auto_comma_var.set(bool(self.saved_config["auto_comma"]))
+
+    def setup_combobox_theme(self):
+        """Mengatur styling Dark Mode untuk dropdown Combobox agar memiliki scrollbar asli tanpa overlap"""
+        # Konfigurasi warna popup Listbox dropdown bawaan OS
+        self.option_add('*TCombobox*Listbox.background', '#171a26')
+        self.option_add('*TCombobox*Listbox.foreground', '#f1f5f9')
+        self.option_add('*TCombobox*Listbox.selectBackground', '#4f46e5')
+        self.option_add('*TCombobox*Listbox.selectForeground', '#ffffff')
+        self.option_add('*TCombobox*Listbox.font', ('Segoe UI', 10))
+        self.option_add('*TCombobox*Listbox.relief', 'flat')
+
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure(
+            'Dark.TCombobox',
+            fieldbackground='#212536',
+            background='#2b3047',
+            foreground='#f1f5f9',
+            darkcolor='#212536',
+            lightcolor='#212536',
+            bordercolor='#2e344e',
+            arrowcolor='#818cf8',
+            padding=6,
+            font=('Segoe UI', 10)
+        )
+        style.map(
+            'Dark.TCombobox',
+            fieldbackground=[('readonly', '#212536'), ('disabled', '#151722')],
+            foreground=[('readonly', '#f1f5f9'), ('disabled', '#64748b')],
+            bordercolor=[('focus', '#4f46e5')]
+        )
 
     def setup_ui(self):
-        # 1. Header & Title
-        header_frame = ttk.Frame(self.root)
-        header_frame.pack(padx=20, pady=(15, 5), fill="x")
-        
-        title_label = ttk.Label(
-            header_frame, 
-            text="Real-Time Streaming Voice Changer", 
-            font=("Segoe UI", 14, "bold")
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+
+        # ---------------- 1. HEADER HERO CARD ----------------
+        header_card = ctk.CTkFrame(
+            self,
+            fg_color=COLOR_CARD,
+            corner_radius=14,
+            border_width=1,
+            border_color=COLOR_CARD_BORDER
         )
-        title_label.pack(anchor="w")
-        
-        subtitle_label = ttk.Label(
-            header_frame, 
-            text="Streaming Edge-TTS Audio Chunks langsung ke Sounddevice (Ultra Low Latency)", 
-            font=("Segoe UI", 9), 
-            foreground="gray"
+        header_card.grid(row=0, column=0, padx=22, pady=(20, 10), sticky="ew")
+
+        header_content = ctk.CTkFrame(header_card, fg_color="transparent")
+        header_content.pack(padx=20, pady=16, fill="x")
+
+        title_lbl = ctk.CTkLabel(
+            header_content,
+            text="🎙️  speech2google",
+            font=ctk.CTkFont(family="Segoe UI", size=19, weight="bold"),
+            text_color=COLOR_TEXT_MAIN
         )
-        subtitle_label.pack(anchor="w")
+        title_lbl.pack(anchor="w")
 
-        # 2. Pengaturan Audio Devices & Voice
-        config_frame = ttk.LabelFrame(self.root, text=" Pengaturan Perangkat & Suara ")
-        config_frame.pack(padx=20, pady=10, fill="x")
-
-        # --- Dropdown Input (Microphone) ---
-        ttk.Label(config_frame, text="Pilih Input (Mic):").pack(anchor="w", padx=10, pady=(6, 2))
-        self.mic_list = self.get_device_names(is_input=True)
-        self.mic_dropdown = ttk.Combobox(config_frame, values=self.mic_list, state="readonly")
-        self.mic_dropdown.pack(padx=10, pady=(0, 6), fill="x")
-        self.set_default_dropdown(self.mic_dropdown, is_input=True)
-
-        # --- Dropdown Output (Speaker / VB-Cable) ---
-        ttk.Label(config_frame, text="Pilih Output (Speaker / Virtual Cable):").pack(anchor="w", padx=10, pady=(4, 2))
-        self.speaker_list = self.get_device_names(is_input=False)
-        self.speaker_dropdown = ttk.Combobox(config_frame, values=self.speaker_list, state="readonly")
-        self.speaker_dropdown.pack(padx=10, pady=(0, 6), fill="x")
-        self.set_default_dropdown(self.speaker_dropdown, is_input=False)
-
-        # --- Pilihan Model Suara (Edge-TTS) & Kecepatan ---
-        voice_subframe = ttk.Frame(config_frame)
-        voice_subframe.pack(padx=10, pady=(4, 10), fill="x")
-        
-        # Voice Dropdown
-        voice_left = ttk.Frame(voice_subframe)
-        voice_left.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        ttk.Label(voice_left, text="Karakter Suara:").pack(anchor="w")
-        self.voice_dropdown = ttk.Combobox(
-            voice_left, 
-            values=list(self.voices.keys()), 
-            state="readonly"
+        subtitle_lbl = ctk.CTkLabel(
+            header_content,
+            text="Ultra Low-Latency Audio Streaming • Edge-TTS • PyAV On-the-Fly Decode",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
         )
-        self.voice_dropdown.pack(fill="x", pady=(2, 0))
-        self.voice_dropdown.current(0)
+        subtitle_lbl.pack(anchor="w", pady=(2, 0))
 
-        # Rate Dropdown
-        rate_right = ttk.Frame(voice_subframe)
-        rate_right.pack(side="right", padx=(5, 0))
-        ttk.Label(rate_right, text="Kecepatan:").pack(anchor="w")
-        self.rate_dropdown = ttk.Combobox(
-            rate_right, 
-            values=["Normal (+0%)", "Cepat (+15%)", "Sangat Cepat (+30%)", "Lambat (-10%)"], 
-            state="readonly", 
-            width=18
+        # Status Badge Pill
+        self.status_badge = ctk.CTkLabel(
+            header_content,
+            text="● SIAP DIGUNAKAN",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#94a3b8",
+            fg_color="#212536",
+            corner_radius=20,
+            padx=14,
+            pady=4
         )
-        self.rate_dropdown.pack(pady=(2, 0))
-        self.rate_dropdown.current(0)
+        self.status_badge.pack(anchor="w", pady=(10, 0))
 
-        # --- Pengaturan Deteksi Hening (Silence Detection) ---
-        silence_frame = ttk.Frame(config_frame)
-        silence_frame.pack(padx=10, pady=(0, 10), fill="x")
-        ttk.Label(silence_frame, text="Deteksi Jeda Hening (Berhenti Rekam Saat Diam):").pack(anchor="w")
-        self.pause_dropdown = ttk.Combobox(
-            silence_frame,
+        # ---------------- 2. AUDIO & VOICE CONFIG CARD ----------------
+        dev_card = ctk.CTkFrame(
+            self,
+            fg_color=COLOR_CARD,
+            corner_radius=14,
+            border_width=1,
+            border_color=COLOR_CARD_BORDER
+        )
+        dev_card.grid(row=1, column=0, padx=22, pady=6, sticky="ew")
+        dev_card.grid_columnconfigure((0, 1), weight=1)
+
+        # Title Card
+        ctk.CTkLabel(
+            dev_card,
+            text="PENGATURAN PERANGKAT (MME) & SUARA",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#818cf8"
+        ).grid(row=0, column=0, columnspan=2, padx=18, pady=(14, 8), sticky="w")
+
+        # Column 0: Input Mic (Dropdown Asli Ber-Scrollbar)
+        ctk.CTkLabel(
+            dev_card,
+            text="Input Mikrofon (Mic):",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
+        ).grid(row=1, column=0, padx=(18, 10), pady=(4, 2), sticky="w")
+
+        self.mic_cb = ttk.Combobox(
+            dev_card,
+            values=self.mic_list if self.mic_list else ["Tidak ada mic ditemukan"],
+            style="Dark.TCombobox",
+            state="readonly",
+            height=12  # Menampilkan 12 item sekaligus dengan scrollbar bawaan
+        )
+        self.mic_cb.grid(row=2, column=0, padx=(18, 10), pady=(0, 12), sticky="ew")
+        self.set_default_device(self.mic_cb, is_input=True)
+
+        ctk.CTkLabel(
+            dev_card,
+            text="Karakter Suara (Edge-TTS):",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
+        ).grid(row=3, column=0, padx=(18, 10), pady=(4, 2), sticky="w")
+
+        self.voice_opt = ctk.CTkOptionMenu(
+            dev_card,
+            values=list(self.voices.keys()),
+            corner_radius=8,
+            height=36,
+            fg_color="#212536",
+            button_color="#2b3047",
+            button_hover_color="#3c4365",
+            text_color=COLOR_TEXT_MAIN,
+            dropdown_fg_color="#1d2030",
+            dropdown_text_color=COLOR_TEXT_MAIN
+        )
+        self.voice_opt.grid(row=4, column=0, padx=(18, 10), pady=(0, 16), sticky="ew")
+        self.voice_opt.set("Gadis (Wanita - Indonesia)")
+
+        # Column 1: Output Speaker (Dropdown Asli Ber-Scrollbar)
+        ctk.CTkLabel(
+            dev_card,
+            text="Output Audio (Speaker / Virtual Cable):",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
+        ).grid(row=1, column=1, padx=(10, 18), pady=(4, 2), sticky="w")
+
+        self.speaker_cb = ttk.Combobox(
+            dev_card,
+            values=self.speaker_list if self.speaker_list else ["Tidak ada output ditemukan"],
+            style="Dark.TCombobox",
+            state="readonly",
+            height=12
+        )
+        self.speaker_cb.grid(row=2, column=1, padx=(10, 18), pady=(0, 12), sticky="ew")
+        self.set_default_device(self.speaker_cb, is_input=False)
+
+        ctk.CTkLabel(
+            dev_card,
+            text="Kecepatan Artikulasi:",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
+        ).grid(row=3, column=1, padx=(10, 18), pady=(4, 2), sticky="w")
+
+        self.rate_opt = ctk.CTkOptionMenu(
+            dev_card,
+            values=["Normal (+0%)", "Cepat (+15%)", "Sangat Cepat (+30%)", "Lambat (-10%)"],
+            corner_radius=8,
+            height=36,
+            fg_color="#212536",
+            button_color="#2b3047",
+            button_hover_color="#3c4365",
+            text_color=COLOR_TEXT_MAIN,
+            dropdown_fg_color="#1d2030",
+            dropdown_text_color=COLOR_TEXT_MAIN
+        )
+        self.rate_opt.grid(row=4, column=1, padx=(10, 18), pady=(0, 16), sticky="ew")
+        self.rate_opt.set("Normal (+0%)")
+
+        # ---------------- 3. SILENCE & AUTO-COMMA CARD ----------------
+        silence_card = ctk.CTkFrame(
+            self,
+            fg_color=COLOR_CARD,
+            corner_radius=14,
+            border_width=1,
+            border_color=COLOR_CARD_BORDER
+        )
+        silence_card.grid(row=2, column=0, padx=22, pady=6, sticky="ew")
+        silence_card.grid_columnconfigure((0, 1), weight=1)
+
+        # Silence Pause Dropdown
+        ctk.CTkLabel(
+            silence_card,
+            text="Deteksi Jeda Hening (Selesai Bicara):",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
+        ).grid(row=0, column=0, padx=(18, 10), pady=(12, 2), sticky="w")
+
+        self.pause_opt = ctk.CTkOptionMenu(
+            silence_card,
             values=[
                 "0.8 detik (Respons Cepat)",
-                "1.2 detik (Standar Alami - Rekomendasi)",
-                "1.6 detik (Santai / Kalimat Panjang)",
-                "2.0 detik (Bicara Sangat Lambat)"
+                "1.2 detik (Standar Alami)",
+                "1.6 detik (Santai / Panjang)",
+                "2.0 detik (Sangat Lambat)"
             ],
-            state="readonly"
+            corner_radius=8,
+            height=36,
+            fg_color="#212536",
+            button_color="#2b3047",
+            button_hover_color="#3c4365",
+            text_color=COLOR_TEXT_MAIN,
+            dropdown_fg_color="#1d2030",
+            dropdown_text_color=COLOR_TEXT_MAIN
         )
-        self.pause_dropdown.pack(fill="x", pady=(2, 0))
-        self.pause_dropdown.current(1)  # Default 1.2 detik
+        self.pause_opt.grid(row=1, column=0, padx=(18, 10), pady=(0, 14), sticky="ew")
+        self.pause_opt.set("1.2 detik (Standar Alami)")
 
-        # Checkbox Auto-Koma pada jeda bicara
-        self.auto_comma_var = tk.BooleanVar(value=True)
-        self.chk_auto_comma = ttk.Checkbutton(
-            silence_frame,
-            text="Otomatis sisipkan tanda koma (,) saat ada jeda bicara",
-            variable=self.auto_comma_var
+        # Auto-Comma Switch
+        switch_frame = ctk.CTkFrame(silence_card, fg_color="transparent")
+        switch_frame.grid(row=0, column=1, rowspan=2, padx=(10, 18), pady=(14, 14), sticky="ew")
+
+        ctk.CTkLabel(
+            switch_frame,
+            text="Otomatisasi Tanda Baca:",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
+        ).pack(anchor="w")
+
+        self.auto_comma_var = ctk.BooleanVar(value=True)
+        self.chk_auto_comma = ctk.CTkSwitch(
+            switch_frame,
+            text="Sisipkan Koma (,) pada Jeda",
+            variable=self.auto_comma_var,
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color=COLOR_TEXT_MAIN,
+            progress_color=COLOR_PRIMARY,
+            button_color="#ffffff",
+            button_hover_color="#e0e7ff"
         )
-        self.chk_auto_comma.pack(anchor="w", pady=(8, 0))
+        self.chk_auto_comma.pack(anchor="w", pady=(6, 0))
 
-        # 3. Status Bar
-        status_frame = ttk.Frame(self.root)
-        status_frame.pack(padx=20, pady=5, fill="x")
-        
-        self.status_label = ttk.Label(
-            status_frame, 
-            text="Status: Program Siap.", 
-            font=("Segoe UI", 10, "bold"), 
-            foreground="#555555"
+        # ---------------- 4. TRANSCRIPT & LOGS CARD ----------------
+        log_card = ctk.CTkFrame(
+            self,
+            fg_color=COLOR_CARD,
+            corner_radius=14,
+            border_width=1,
+            border_color=COLOR_CARD_BORDER
         )
-        self.status_label.pack(side="left")
+        log_card.grid(row=3, column=0, padx=22, pady=6, sticky="nsew")
+        log_card.grid_columnconfigure(0, weight=1)
+        log_card.grid_rowconfigure(1, weight=1)
 
-        # 4. Transkrip & Log Box
-        log_frame = ttk.LabelFrame(self.root, text=" Transkrip Percakapan Real-Time ")
-        log_frame.pack(padx=20, pady=5, fill="both", expand=True)
+        ctk.CTkLabel(
+            log_card,
+            text="TRANSKRIP PERCAKAPAN REAL-TIME",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#818cf8"
+        ).grid(row=0, column=0, padx=18, pady=(12, 6), sticky="w")
 
-        self.txt_log = scrolledtext.ScrolledText(log_frame, wrap="word", height=8, font=("Consolas", 9))
-        self.txt_log.pack(padx=10, pady=10, fill="both", expand=True)
-        self.txt_log.insert(tk.END, "Tekan 'MULAI STREAMING' lalu bicaralah ke mikrofon...\n")
-        self.txt_log.config(state="disabled")
-
-        # 5. Tombol Kontrol (Start / Stop)
-        control_frame = ttk.Frame(self.root)
-        control_frame.pack(padx=20, pady=(10, 15), fill="x")
-
-        self.btn_control = ttk.Button(
-            control_frame, 
-            text="MULAI STREAMING", 
-            command=self.toggle_process, 
-            width=25
+        self.txt_log = ctk.CTkTextbox(
+            log_card,
+            wrap="word",
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color="#0f111a",
+            text_color="#e2e8f0",
+            border_width=1,
+            border_color="#202436",
+            corner_radius=10
         )
-        self.btn_control.pack(ipady=5)
+        self.txt_log.grid(row=1, column=0, padx=14, pady=(0, 14), sticky="nsew")
+        self.txt_log.insert("end", "💡 Klik 'MULAI STREAMING' lalu bicaralah ke mikrofon Anda...\n\n")
+        self.txt_log.configure(state="disabled")
+
+        # ---------------- 5. ACTION BUTTON ----------------
+        self.btn_control = ctk.CTkButton(
+            self,
+            text="▶   MULAI STREAMING",
+            command=self.toggle_process,
+            height=50,
+            corner_radius=12,
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            text_color="#ffffff"
+        )
+        self.btn_control.grid(row=4, column=0, padx=22, pady=(10, 20), sticky="ew")
+
+        # Event callbacks untuk auto-save preferensi lokal saat diubah pengguna
+        self.mic_cb.bind("<<ComboboxSelected>>", lambda e: self.save_config())
+        self.speaker_cb.bind("<<ComboboxSelected>>", lambda e: self.save_config())
+        self.voice_opt.configure(command=lambda e: self.save_config())
+        self.rate_opt.configure(command=lambda e: self.save_config())
+        self.pause_opt.configure(command=lambda e: self.save_config())
+        self.chk_auto_comma.configure(command=self.save_config)
+
+    def set_status_badge(self, text, state="idle"):
+        """Mengubah pill status badge dengan warna indikator modern"""
+        palette = {
+            "idle": ("● " + text, "#94a3b8", "#212536"),
+            "listening": ("● " + text, "#34d399", "#064e3b"),
+            "processing": ("● " + text, "#fbbf24", "#78350f"),
+            "streaming": ("● " + text, "#60a5fa", "#1e3a8a"),
+            "stopped": ("● " + text, "#f87171", "#450a0a"),
+        }
+        badge_text, text_col, bg_col = palette.get(state, ("● " + text, "#94a3b8", "#212536"))
+        self.after(0, lambda: self.status_badge.configure(text=badge_text, text_color=text_col, fg_color=bg_col))
 
     def log_message(self, message):
         """Menambahkan pesan ke area transkrip secara thread-safe"""
         def _append():
-            self.txt_log.config(state="normal")
-            self.txt_log.insert(tk.END, message + "\n")
-            self.txt_log.see(tk.END)
-            self.txt_log.config(state="disabled")
-        self.root.after(0, _append)
-
-    def set_status(self, text, color="#555555"):
-        """Mengubah status secara thread-safe"""
-        self.root.after(0, lambda: self.status_label.config(text=f"Status: {text}", foreground=color))
+            self.txt_log.configure(state="normal")
+            self.txt_log.insert("end", message + "\n")
+            self.txt_log.see("end")
+            self.txt_log.configure(state="disabled")
+        self.after(0, _append)
 
     def get_device_names(self, is_input=True):
-        """Mengambil nama perangkat audio berdasarkan tipenya (input/output)"""
+        """Mengambil nama perangkat audio khusus MME (Multimedia) seperti Voicemeeter agar ringkas & bebas duplikasi"""
         device_names = []
+        try:
+            hostapis = sd.query_hostapis()
+            mme_idx = 0
+            for idx, api in enumerate(hostapis):
+                if "MME" in api.get("name", "").upper():
+                    mme_idx = idx
+                    break
+        except Exception:
+            mme_idx = 0
+
         for i, dev in enumerate(self.devices):
-            channels = dev['max_input_channels'] if is_input else dev['max_output_channels']
-            if channels > 0:
-                # Format: "ID: Nama Perangkat"
-                device_names.append(f"{i}: {dev['name']}")
+            # Filter hanya perangkat dengan hostapi == MME
+            if dev.get('hostapi') == mme_idx:
+                channels = dev['max_input_channels'] if is_input else dev['max_output_channels']
+                if channels > 0:
+                    device_names.append(f"{i}: {dev['name']}")
         return device_names
 
-    def set_default_dropdown(self, dropdown, is_input=True):
-        """Mengatur pilihan dropdown ke default bawaan sistem operasi"""
+    def set_default_device(self, combobox, is_input=True):
+        """Mengatur pilihan dropdown ke default bawaan OS"""
         try:
             default_idx = sd.default.device[0] if is_input else sd.default.device[1]
-            for item in dropdown['values']:
+            device_list = self.mic_list if is_input else self.speaker_list
+            # 1. Cek kecocokan nomor ID secara langsung
+            for idx, item in enumerate(device_list):
                 if item.startswith(f"{default_idx}:"):
-                    dropdown.set(item)
+                    combobox.current(idx)
                     return
-            if dropdown['values']:
-                dropdown.current(0)
+            # 2. Jika ID default ada di hostapi non-MME, cari berdasarkan kesamaan nama
+            if 0 <= default_idx < len(self.devices):
+                def_name = self.devices[default_idx]['name'].lower()
+                for idx, item in enumerate(device_list):
+                    item_name = item.split(":", 1)[1].strip().lower()
+                    if item_name in def_name or def_name in item_name:
+                        combobox.current(idx)
+                        return
+            if device_list:
+                combobox.current(0)
         except Exception:
-            if dropdown['values']:
-                dropdown.current(0)
+            if combobox['values']:
+                combobox.current(0)
 
     def toggle_process(self):
         if not self.is_running:
@@ -214,58 +532,65 @@ class RealtimeVoiceChanger:
                     "Pustaka 'edge-tts' atau 'av' belum terdeteksi.\nSilakan jalankan di terminal:\npip install -r requirements.txt"
                 )
                 return
+
             self.is_running = True
-            self.btn_control.config(text="HENTIKAN PROGRAM")
-            self.mic_dropdown.config(state="disabled")
-            self.speaker_dropdown.config(state="disabled")
-            self.voice_dropdown.config(state="disabled")
-            self.rate_dropdown.config(state="disabled")
-            self.pause_dropdown.config(state="disabled")
-            self.chk_auto_comma.config(state="disabled")
-            
+            self.btn_control.configure(
+                text="⏹   HENTIKAN PROGRAM",
+                fg_color=COLOR_DANGER,
+                hover_color=COLOR_DANGER_HOVER
+            )
+            self.mic_cb.configure(state="disabled")
+            self.speaker_cb.configure(state="disabled")
+            self.voice_opt.configure(state="disabled")
+            self.rate_opt.configure(state="disabled")
+            self.pause_opt.configure(state="disabled")
+            self.chk_auto_comma.configure(state="disabled")
+
             self.worker_thread = threading.Thread(target=self.loop_suara, daemon=True)
             self.worker_thread.start()
         else:
             self.is_running = False
-            self.btn_control.config(text="MULAI STREAMING")
-            self.mic_dropdown.config(state="readonly")
-            self.speaker_dropdown.config(state="readonly")
-            self.voice_dropdown.config(state="readonly")
-            self.rate_dropdown.config(state="readonly")
-            self.pause_dropdown.config(state="readonly")
-            self.chk_auto_comma.config(state="normal")
-            self.set_status("Dihentikan.", "#c0392b")
+            self.btn_control.configure(
+                text="▶   MULAI STREAMING",
+                fg_color=COLOR_PRIMARY,
+                hover_color=COLOR_PRIMARY_HOVER
+            )
+            self.mic_cb.configure(state="readonly")
+            self.speaker_cb.configure(state="readonly")
+            self.voice_opt.configure(state="normal")
+            self.rate_opt.configure(state="normal")
+            self.pause_opt.configure(state="normal")
+            self.chk_auto_comma.configure(state="normal")
+            self.set_status_badge("PROGRAM DIHENTIKAN", "stopped")
 
     def loop_suara(self):
         """Worker thread untuk menangani siklus Input -> STT -> Streaming TTS -> Output"""
         try:
-            mic_id = int(self.mic_dropdown.get().split(":")[0])
-            speaker_id = int(self.speaker_dropdown.get().split(":")[0])
+            mic_id = int(self.mic_cb.get().split(":")[0])
+            speaker_id = int(self.speaker_cb.get().split(":")[0])
         except Exception:
-            self.root.after(0, lambda: messagebox.showerror("Error", "Silakan pilih perangkat input dan output terlebih dahulu."))
-            self.root.after(0, self.toggle_process)
+            self.after(0, lambda: messagebox.showerror("Error", "Silakan pilih perangkat input dan output terlebih dahulu."))
+            self.after(0, self.toggle_process)
             return
 
-        selected_voice_key = self.voice_dropdown.get()
+        selected_voice_key = self.voice_opt.get()
         voice_id = self.voices.get(selected_voice_key, "id-ID-GadisNeural")
-        
-        # Kecepatan bicara
+
         rate_map = {
             "Normal (+0%)": "+0%",
             "Cepat (+15%)": "+15%",
             "Sangat Cepat (+30%)": "+30%",
             "Lambat (-10%)": "-10%"
         }
-        speech_rate = rate_map.get(self.rate_dropdown.get(), "+0%")
+        speech_rate = rate_map.get(self.rate_opt.get(), "+0%")
 
-        # Parsing durasi jeda hening dari pilihan pengguna
+        # Parsing durasi jeda hening
         try:
-            pause_sec = float(self.pause_dropdown.get().split(" ")[0])
+            pause_sec = float(self.pause_opt.get().split(" ")[0])
         except Exception:
             pause_sec = 1.2
 
         perekam = sr.Recognizer()
-        # Rekam terus sampai terdeteksi jeda hening selama pause_sec
         perekam.pause_threshold = pause_sec
         perekam.non_speaking_duration = min(0.5, pause_sec / 2)
         perekam.phrase_threshold = 0.3
@@ -273,35 +598,32 @@ class RealtimeVoiceChanger:
         try:
             mic_source = sr.Microphone(device_index=mic_id)
         except Exception as e:
-            self.log_message(f"[Error] Gagal membuka mikrofon ID {mic_id}: {e}")
-            self.root.after(0, self.toggle_process)
+            self.log_message(f"❌ [Error] Gagal membuka mikrofon ID {mic_id}: {e}")
+            self.after(0, self.toggle_process)
             return
 
-        self.set_status("Mengalibrasi mikrofon & noise...", "#2980b9")
+        self.set_status_badge("MENGALIBRASI MIKROFON...", "processing")
         try:
             with mic_source as sumber_suara:
                 perekam.adjust_for_ambient_noise(sumber_suara, duration=0.8)
-                # Buat threshold sedikit lebih sensitif agar kata lembut/ujung kalimat tidak terpotong
                 perekam.energy_threshold = max(80, perekam.energy_threshold * 0.75)
-                # Matikan auto-penyesuaian threshold saat bicara agar tidak memotong kata di tengah kalimat
                 perekam.dynamic_energy_threshold = False
         except Exception as e:
-            self.log_message(f"[Warning] Kalibrasi noise dilewati: {e}")
+            self.log_message(f"⚠️ [Warning] Kalibrasi noise dilewati: {e}")
 
-        self.log_message("=== Sistem Siap. Silakan berbicara... ===")
+        self.log_message("✨ [Sistem]: Siap mendengarkan. Silakan berbicara...")
 
         while self.is_running:
-            self.set_status("Mendengarkan suara Anda...", "#27ae60")
-            
+            self.set_status_badge("MENDENGARKAN SUARA ANDA...", "listening")
+
             try:
                 with mic_source as sumber_suara:
-                    # phrase_time_limit=None: TIDAK ADA batas detik! Rekam terus sampai suara berhenti/hening
                     audio = perekam.listen(sumber_suara, timeout=2.0, phrase_time_limit=None)
             except sr.WaitTimeoutError:
                 continue
             except Exception as e:
                 if self.is_running:
-                    self.log_message(f"[Error Mic]: {e}")
+                    self.log_message(f"❌ [Error Mic]: {e}")
                 break
 
             if not self.is_running:
@@ -309,21 +631,19 @@ class RealtimeVoiceChanger:
 
             # 1. Proses STT (Speech to Text)
             t_start = time.time()
-            self.set_status("Memproses suara -> teks...", "#d35400")
-            
+            self.set_status_badge("MEMPROSES SUARA -> TEKS...", "processing")
+
             try:
-                # Jika opsi auto-koma aktif, periksa apakah ada jeda hening di tengah bicara
                 if self.auto_comma_var.get():
                     audio_chunks = self.split_audio_by_pauses(
-                        audio, 
-                        min_silence_sec=0.35, 
+                        audio,
+                        min_silence_sec=0.35,
                         energy_threshold=perekam.energy_threshold * 1.15
                     )
                 else:
                     audio_chunks = [audio]
 
                 if len(audio_chunks) > 1:
-                    # Jalankan pengenalan paralel untuk tiap potongan agar latensi tetap sangat rendah
                     def _recognize_single(chunk):
                         try:
                             return perekam.recognize_google(chunk, language="id-ID").strip()
@@ -333,7 +653,6 @@ class RealtimeVoiceChanger:
                     with ThreadPoolExecutor(max_workers=min(4, len(audio_chunks))) as executor:
                         transcripts = list(executor.map(_recognize_single, audio_chunks))
 
-                    # Gabungkan potongan kata dengan tanda koma (,)
                     valid_parts = [p for p in transcripts if p]
                     if not valid_parts:
                         continue
@@ -343,48 +662,41 @@ class RealtimeVoiceChanger:
                     if not teks_hasil.strip():
                         continue
 
-                # Percantik tanda baca (kapitalisasi & koma sebelum kata hubung)
                 teks_hasil = self.enhance_punctuation(teks_hasil)
-                
-                t_stt = time.time()
-                self.log_message(f"[Anda]: \"{teks_hasil}\"")
-                
+                self.log_message(f"🗣️ [Anda]: \"{teks_hasil}\"")
+
             except sr.UnknownValueError:
-                # Tidak ada kata yang dikenali / hanya hembusan nafas
                 continue
             except sr.RequestError as e:
-                self.log_message(f"[Error STT]: Koneksi gagal: {e}")
+                self.log_message(f"❌ [Error STT]: Koneksi gagal: {e}")
                 continue
             except Exception as e:
-                self.log_message(f"[Error STT]: {e}")
+                self.log_message(f"❌ [Error STT]: {e}")
                 continue
 
             if not self.is_running:
                 break
 
             # 2. Proses Streaming TTS & Playback langsung ke Sounddevice
-            self.set_status("Streaming audio chunks ke output...", "#2980b9")
+            self.set_status_badge("STREAMING SUARA KE OUTPUT...", "streaming")
             try:
                 self.stream_tts_to_speaker(teks_hasil, voice_id, speech_rate, speaker_id)
                 t_total = time.time() - t_start
-                self.log_message(f"[Robot]: (Selesai diputar dalam {t_total:.2f} detik)\n")
+                self.log_message(f"🤖 [Robot]: Selesai diputar ({t_total:.2f}s)\n")
             except Exception as e:
-                self.log_message(f"[Error TTS/Audio]: {e}")
+                self.log_message(f"❌ [Error Audio Out]: {e}")
 
-        self.set_status("Dihentikan.", "#c0392b")
+        self.set_status_badge("PROGRAM DIHENTIKAN", "stopped")
 
     def split_audio_by_pauses(self, audio, min_silence_sec=0.35, energy_threshold=120):
-        """
-        Mendeteksi jeda hening / nafas di tengah percakapan dan membagi audio
-        menjadi beberapa segmen AudioData untuk disisipkan tanda koma.
-        """
+        """Mendeteksi jeda hening / nafas di tengah percakapan untuk disisipkan koma"""
         try:
             raw_data = audio.get_raw_data()
             samples = np.frombuffer(raw_data, dtype=np.int16)
             sr_rate = audio.sample_rate
             sample_width = audio.sample_width
 
-            window_samples = int(sr_rate * 0.05)  # Window 50ms
+            window_samples = int(sr_rate * 0.05)
             if len(samples) < window_samples * 25:
                 return [audio]
 
@@ -405,7 +717,6 @@ class RealtimeVoiceChanger:
                         start_silence = i
                     silent_count += 1
                 else:
-                    # Pastikan jeda hening terjadi di tengah kalimat (bukan awal atau akhir)
                     if silent_count >= min_silent_windows and start_silence is not None:
                         if start_silence > 8 and (len(is_silent) - i) > 8:
                             mid_point = (start_silence + i) // 2
@@ -434,26 +745,19 @@ class RealtimeVoiceChanger:
             return [audio]
 
     def enhance_punctuation(self, text):
-        """
-        Merapikan tanda baca: kapitalisasi awal kalimat, menyisipkan koma
-        sebelum konjungsi bahasa Indonesia, dan tanda titik di akhir.
-        """
+        """Merapikan tanda baca: kapitalisasi awal dan koma sebelum konjungsi"""
         text = text.strip()
         if not text:
             return ""
 
-        # Kapitalisasi huruf pertama
         text = text[0].upper() + text[1:]
-
-        # Sisipkan koma sebelum kata hubung umum jika belum ada koma
         conjunctions = [
-            "tetapi", "tapi", "karena", "sehingga", "sedangkan", 
+            "tetapi", "tapi", "karena", "sehingga", "sedangkan",
             "namun", "melainkan", "padahal", "bahkan", "yaitu", "yakni"
         ]
         for conj in conjunctions:
             text = re.sub(r'(?<!,)\s+(' + conj + r')\b', r', \1', text, flags=re.IGNORECASE)
 
-        # Rapikan koma ganda atau spasi berlebih
         text = re.sub(r',\s*,+', ',', text)
         text = re.sub(r'\s+', ' ', text)
 
@@ -463,10 +767,7 @@ class RealtimeVoiceChanger:
         return text
 
     def stream_tts_to_speaker(self, text, voice, rate, speaker_id):
-        """
-        Streaming potongan audio Edge-TTS langsung ke PyAV untuk didecode ke PCM
-        dan diputar ke output device secara realtime tanpa jeda file MP3.
-        """
+        """Streaming Edge-TTS langsung ke PyAV -> sounddevice.OutputStream"""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -478,31 +779,26 @@ class RealtimeVoiceChanger:
         comm = edge_tts.Communicate(text, voice=voice, rate=rate)
         codec = av.CodecContext.create('mp3', 'r')
 
-        # Inisialisasi output stream Sounddevice
-        # Edge-TTS menghasilkan MP3 24000 Hz Mono
         with sd.OutputStream(
-            samplerate=24000, 
-            channels=1, 
-            dtype='int16', 
-            device=speaker_id, 
+            samplerate=24000,
+            channels=1,
+            dtype='int16',
+            device=speaker_id,
             latency='low'
         ) as stream:
             async for chunk in comm.stream():
                 if not self.is_running:
                     break
                 if chunk['type'] == 'audio':
-                    # Parse paket MP3 dari potongan data streaming
                     packets = codec.parse(chunk['data'])
                     for packet in packets:
                         frames = codec.decode(packet)
                         for frame in frames:
                             if not self.is_running:
                                 return
-                            # Ubah frame audio ke numpy array PCM (samples, 1) int16
                             pcm_data = frame.to_ndarray().T
                             stream.write(pcm_data)
 
-            # Flush sisa frame dari codec
             for frame in codec.decode():
                 if not self.is_running:
                     return
@@ -510,10 +806,10 @@ class RealtimeVoiceChanger:
                 stream.write(pcm_data)
 
     def on_close(self):
+        self.save_config()
         self.is_running = False
-        self.root.destroy()
+        self.destroy()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = RealtimeVoiceChanger(root)
-    root.mainloop()
+    app = RealtimeVoiceChanger()
+    app.mainloop()

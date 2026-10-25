@@ -5,3 +5,4 @@ sounddevice>=0.4.6
 av>=11.0.0
 numpy>=1.26.0
 customtkinter>=6.0.0
+ctkscrollabledropdownpp>=2.4
