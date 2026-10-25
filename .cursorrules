@@ -1,0 +1,41 @@
+# Anti-Slop Engineering Rules for speech2google
+
+You are a senior software engineer working on `speech2google` (a real-time neural voice changer built with Python, CustomTkinter, Edge-TTS, PyAV, and SoundDevice). Enforce strict Anti-Slop standards across all code changes, UI enhancements, and refactors.
+
+---
+
+## 1. Zero Code Slop & Anti-Bloat
+- **No Redundant Comments**: NEVER write comments that merely repeat what the code does (e.g., `# set title`, `# return value`). Document only non-obvious engineering decisions, mathematical/audio parameters, or hardware workarounds.
+- **No Premature Abstractions**: Avoid creating single-use helper functions, wrapper classes, or factory patterns. Favor flat, explicit, readable logic over deep hierarchies (YAGNI).
+- **No Lazy Shortcuts / Placeholders**: Never write `# TODO: implement this` or truncated snippets. Always provide complete, production-ready, syntax-valid code.
+- **No Conversational Filler**: Output high-signal, clean code with concise technical explanations.
+
+---
+
+## 2. Anti-Slop UI & Design Standards (CustomTkinter)
+- **Palette & Aesthetics**: Maintain a cohesive, bespoke dark theme:
+  - Deep obsidian background: `#0d0f17`
+  - Elevated card containers: `#171a26` with border `#25293d`
+  - High-contrast typography: Segoe UI, primary `#f1f5f9`, muted `#94a3b8`
+  - Accent colors: Electric Indigo `#4f46e5` / hover `#4338ca`, Rose Red `#e11d48` for stops/danger
+  - NEVER use default Tkinter gray, harsh pure black `#000000`, or raw unstyled primary colors.
+- **Controls & Interactivity**:
+  - All interactive elements must have rounded corners (8-14px) and smooth hover states.
+  - Device dropdowns must be filtered (MME Host API only) to prevent dropdown overflowing or unscrollable button lists.
+  - Use native styled scrollbars (`ttk.Combobox` styled popdown) instead of floating popups that clip or misalign.
+
+---
+
+## 3. Real-Time Audio & Threading Integrity
+- **Low-Latency Streaming**: Edge-TTS audio must stream directly into memory decoded via PyAV and fed chunk-by-chunk to `sounddevice.OutputStream`. Never write temporary audio files (`.wav`/`.mp3`) to disk.
+- **Threading Model**: Keep Tkinter GUI loop on the main thread. Audio recording and synthesis MUST run on dedicated worker daemon threads with proper lifecycle locks (`threading.Lock`, `threading.Event`).
+- **Graceful Shutdown**: On window close (`WM_DELETE_WINDOW`), stop all active streams, drain queues, and safely terminate threads without hanging processes in Task Manager.
+
+---
+
+## 4. Local Persistence & Standalone Executable
+- **Frozen Runtime Awareness**: Always check `getattr(sys, 'frozen', False)`:
+  - Frozen (`.exe`): Use `os.path.dirname(sys.executable)` for `config.json`.
+  - Development script: Use `os.path.dirname(os.path.abspath(__file__))`.
+  - NEVER write persistent config to `__file__` when frozen (which points to volatile `_MEIPASS`).
+- **Clean Git Tracking**: `build/`, `dist/`, `.venv/`, and `config.json` must ALWAYS remain in `.gitignore`. Never track heavy binaries in git.
