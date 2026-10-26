@@ -9,9 +9,12 @@ cd /d "%~dp0"
 
 REM Periksa apakah virtual environment ada
 if exist ".venv\Scripts\activate.bat" (
-    echo Mengaktifkan Virtual Environment (.venv)...
+    echo Mengaktifkan Virtual Environment .venv...
     call .venv\Scripts\activate.bat
 )
+
+REM Tutup instance speech2google yang sedang berjalan jika ada
+taskkill /F /IM speech2google.exe >nul 2>&1
 
 REM Jalankan PyInstaller menggunakan spec file yang sudah terkonfigurasi
 echo Menjalankan PyInstaller...

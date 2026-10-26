@@ -9,6 +9,8 @@ if (Test-Path ".\.venv\Scripts\Activate.ps1") {
     & ".\.venv\Scripts\Activate.ps1"
 }
 
+Get-Process -Name "speech2google" -ErrorAction SilentlyContinue | Stop-Process -Force
+
 Write-Host "Menjalankan PyInstaller..." -ForegroundColor Green
 pyinstaller --noconfirm --clean NeuralVoiceChanger.spec
 

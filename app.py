@@ -1,6 +1,6 @@
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import speech_recognition as sr
 import sounddevice as sd
 try:
@@ -12,6 +12,13 @@ try:
     import av  # type: ignore
 except ImportError:
     av = None
+
+try:
+    import gtts  # type: ignore
+except ImportError:
+    gtts = None
+
+import io
 
 import sys
 import os
@@ -48,14 +55,19 @@ class RealtimeVoiceChanger(ctk.CTk):
         super().__init__()
 
         self.title("speech2google")
-        self.geometry("700x780")
-        self.minsize(640, 700)
+        self.geometry("700x820")
+        self.minsize(660, 720)
         self.configure(fg_color=COLOR_BG)
 
         self.is_running = False
+        self.tts_is_playing = False
         self.worker_thread = None
+        self.tts_thread = None
+        self.active_tab = "streaming"
 
         self.voices = {
+            "Google Translate Meme (Mbak Google - ID)": "gtts:id",
+            "Google Translate (English - US)": "gtts:en",
             "Gadis (Wanita - Indonesia)": "id-ID-GadisNeural",
             "Ardi (Pria - Indonesia)": "id-ID-ArdiNeural",
             "Jenny (Female - English US)": "en-US-JennyNeural",
@@ -124,18 +136,22 @@ class RealtimeVoiceChanger(ctk.CTk):
             for idx, item in enumerate(self.speaker_list):
                 if saved_speaker.lower() in item.lower():
                     self.speaker_cb.current(idx)
+                    self.tts_speaker_cb.current(idx)
                     matched = True
                     break
             if not matched:
                 self.set_default_device(self.speaker_cb, is_input=False)
+                self.set_default_device(self.tts_speaker_cb, is_input=False)
 
         saved_voice = self.saved_config.get("voice", "")
         if saved_voice in self.voices:
             self.voice_opt.set(saved_voice)
+            self.tts_voice_opt.set(saved_voice)
 
         saved_rate = self.saved_config.get("rate", "")
         if saved_rate:
             self.rate_opt.set(saved_rate)
+            self.tts_rate_opt.set(saved_rate)
 
         saved_pause = self.saved_config.get("pause_threshold", "")
         if saved_pause:
@@ -175,8 +191,9 @@ class RealtimeVoiceChanger(ctk.CTk):
 
     def setup_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(2, weight=1)
 
+        # ---------------- 1. HEADER HERO CARD ----------------
         header_card = ctk.CTkFrame(
             self,
             fg_color=COLOR_CARD,
@@ -184,26 +201,48 @@ class RealtimeVoiceChanger(ctk.CTk):
             border_width=1,
             border_color=COLOR_CARD_BORDER
         )
-        header_card.grid(row=0, column=0, padx=22, pady=(20, 10), sticky="ew")
+        header_card.grid(row=0, column=0, padx=22, pady=(16, 8), sticky="ew")
 
         header_content = ctk.CTkFrame(header_card, fg_color="transparent")
-        header_content.pack(padx=20, pady=16, fill="x")
+        header_content.pack(padx=20, pady=14, fill="x")
+
+        title_row = ctk.CTkFrame(header_content, fg_color="transparent")
+        title_row.pack(anchor="w")
+
+        icon_frame = ctk.CTkFrame(
+            title_row,
+            width=36,
+            height=36,
+            corner_radius=9,
+            fg_color="#212536",
+            border_width=1,
+            border_color="#2e344e"
+        )
+        icon_frame.pack(side="left", padx=(0, 10))
+        icon_frame.pack_propagate(False)
+
+        icon_lbl = ctk.CTkLabel(
+            icon_frame,
+            text="🎙",
+            font=ctk.CTkFont(size=18)
+        )
+        icon_lbl.place(relx=0.5, rely=0.5, anchor="center")
 
         title_lbl = ctk.CTkLabel(
-            header_content,
+            title_row,
             text="speech2google",
             font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
             text_color=COLOR_TEXT_MAIN
         )
-        title_lbl.pack(anchor="w")
+        title_lbl.pack(side="left")
 
         subtitle_lbl = ctk.CTkLabel(
             header_content,
-            text="Speech-to-speech voice changer • Edge-TTS & PyAV streaming",
+            text="Realtime Speech-to-Speech Streaming & Neural Text-to-Speech",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLOR_TEXT_MUTED
         )
-        subtitle_lbl.pack(anchor="w", pady=(2, 0))
+        subtitle_lbl.pack(anchor="w", pady=(3, 0))
 
         self.status_badge = ctk.CTkLabel(
             header_content,
@@ -215,16 +254,97 @@ class RealtimeVoiceChanger(ctk.CTk):
             padx=14,
             pady=4
         )
-        self.status_badge.pack(anchor="w", pady=(10, 0))
+        self.status_badge.pack(anchor="w", pady=(8, 0))
 
+        # ---------------- 2. TOPBAR NAVBAR TABS ----------------
+        nav_frame = ctk.CTkFrame(self, fg_color="transparent")
+        nav_frame.grid(row=1, column=0, padx=22, pady=(0, 8), sticky="ew")
+
+        nav_container = ctk.CTkFrame(
+            nav_frame,
+            fg_color=COLOR_CARD,
+            corner_radius=10,
+            border_width=1,
+            border_color=COLOR_CARD_BORDER,
+            height=44
+        )
+        nav_container.pack(fill="x")
+        nav_container.grid_columnconfigure((0, 1), weight=1)
+
+        self.btn_tab_streaming = ctk.CTkButton(
+            nav_container,
+            text="🎙  Voice Changer (Streaming)",
+            height=34,
+            corner_radius=8,
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            text_color="#ffffff",
+            command=lambda: self.switch_page("streaming")
+        )
+        self.btn_tab_streaming.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
+        self.btn_tab_tts = ctk.CTkButton(
+            nav_container,
+            text="💬  Text to Speech (TTS)",
+            height=34,
+            corner_radius=8,
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            fg_color="transparent",
+            hover_color="#212536",
+            text_color=COLOR_TEXT_MUTED,
+            command=lambda: self.switch_page("tts")
+        )
+        self.btn_tab_tts.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        # ---------------- 3. MAIN CONTENT CONTAINER ----------------
+        self.container = ctk.CTkFrame(self, fg_color="transparent")
+        self.container.grid(row=2, column=0, padx=0, pady=0, sticky="nsew")
+        self.container.grid_columnconfigure(0, weight=1)
+        self.container.grid_rowconfigure(0, weight=1)
+
+        # Build individual page views
+        self.setup_streaming_page()
+        self.setup_tts_page()
+
+        # Display initial page
+        self.switch_page("streaming")
+
+    def switch_page(self, page_name):
+        self.active_tab = page_name
+        if page_name == "streaming":
+            self.btn_tab_streaming.configure(fg_color=COLOR_PRIMARY, text_color="#ffffff")
+            self.btn_tab_tts.configure(fg_color="transparent", text_color=COLOR_TEXT_MUTED)
+            self.page_tts.grid_forget()
+            self.page_streaming.grid(row=0, column=0, sticky="nsew")
+            if not self.is_running:
+                self.set_status_badge("SIAP DIGUNAKAN", "idle")
+            else:
+                self.set_status_badge("STREAMING AKTIF", "listening")
+        else:
+            self.btn_tab_tts.configure(fg_color=COLOR_PRIMARY, text_color="#ffffff")
+            self.btn_tab_streaming.configure(fg_color="transparent", text_color=COLOR_TEXT_MUTED)
+            self.page_streaming.grid_forget()
+            self.page_tts.grid(row=0, column=0, sticky="nsew")
+            if not self.tts_is_playing:
+                self.set_status_badge("TTS SIAP", "idle")
+            else:
+                self.set_status_badge("MEMUTAR SUARA TTS...", "streaming")
+
+    def setup_streaming_page(self):
+        self.page_streaming = ctk.CTkFrame(self.container, fg_color="transparent")
+        self.page_streaming.grid_columnconfigure(0, weight=1)
+        self.page_streaming.grid_rowconfigure(2, weight=1)
+
+        # Device & Voice Settings Card
         dev_card = ctk.CTkFrame(
-            self,
+            self.page_streaming,
             fg_color=COLOR_CARD,
             corner_radius=14,
             border_width=1,
             border_color=COLOR_CARD_BORDER
         )
-        dev_card.grid(row=1, column=0, padx=22, pady=6, sticky="ew")
+        dev_card.grid(row=0, column=0, padx=22, pady=(0, 6), sticky="ew")
         dev_card.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkLabel(
@@ -232,14 +352,14 @@ class RealtimeVoiceChanger(ctk.CTk):
             text="PENGATURAN PERANGKAT & SUARA",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color="#818cf8"
-        ).grid(row=0, column=0, columnspan=2, padx=18, pady=(14, 8), sticky="w")
+        ).grid(row=0, column=0, columnspan=2, padx=18, pady=(12, 6), sticky="w")
 
         ctk.CTkLabel(
             dev_card,
             text="Input Mikrofon (Mic):",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLOR_TEXT_MUTED
-        ).grid(row=1, column=0, padx=(18, 10), pady=(4, 2), sticky="w")
+        ).grid(row=1, column=0, padx=(18, 10), pady=(2, 2), sticky="w")
 
         self.mic_cb = ttk.Combobox(
             dev_card,
@@ -248,7 +368,7 @@ class RealtimeVoiceChanger(ctk.CTk):
             state="readonly",
             height=12
         )
-        self.mic_cb.grid(row=2, column=0, padx=(18, 10), pady=(0, 12), sticky="ew")
+        self.mic_cb.grid(row=2, column=0, padx=(18, 10), pady=(0, 10), sticky="ew")
         self.set_default_device(self.mic_cb, is_input=True)
 
         ctk.CTkLabel(
@@ -256,21 +376,22 @@ class RealtimeVoiceChanger(ctk.CTk):
             text="Karakter Suara (Edge-TTS):",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLOR_TEXT_MUTED
-        ).grid(row=3, column=0, padx=(18, 10), pady=(4, 2), sticky="w")
+        ).grid(row=3, column=0, padx=(18, 10), pady=(2, 2), sticky="w")
 
         self.voice_opt = ctk.CTkOptionMenu(
             dev_card,
             values=list(self.voices.keys()),
             corner_radius=8,
-            height=36,
+            height=34,
             fg_color="#212536",
             button_color="#2b3047",
             button_hover_color="#3c4365",
             text_color=COLOR_TEXT_MAIN,
             dropdown_fg_color="#1d2030",
-            dropdown_text_color=COLOR_TEXT_MAIN
+            dropdown_text_color=COLOR_TEXT_MAIN,
+            command=self.on_voice_changed_sync
         )
-        self.voice_opt.grid(row=4, column=0, padx=(18, 10), pady=(0, 16), sticky="ew")
+        self.voice_opt.grid(row=4, column=0, padx=(18, 10), pady=(0, 14), sticky="ew")
         self.voice_opt.set("Gadis (Wanita - Indonesia)")
 
         ctk.CTkLabel(
@@ -278,7 +399,7 @@ class RealtimeVoiceChanger(ctk.CTk):
             text="Output Audio (Speaker / Virtual Cable):",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLOR_TEXT_MUTED
-        ).grid(row=1, column=1, padx=(10, 18), pady=(4, 2), sticky="w")
+        ).grid(row=1, column=1, padx=(10, 18), pady=(2, 2), sticky="w")
 
         self.speaker_cb = ttk.Combobox(
             dev_card,
@@ -287,7 +408,7 @@ class RealtimeVoiceChanger(ctk.CTk):
             state="readonly",
             height=12
         )
-        self.speaker_cb.grid(row=2, column=1, padx=(10, 18), pady=(0, 12), sticky="ew")
+        self.speaker_cb.grid(row=2, column=1, padx=(10, 18), pady=(0, 10), sticky="ew")
         self.set_default_device(self.speaker_cb, is_input=False)
 
         ctk.CTkLabel(
@@ -295,31 +416,33 @@ class RealtimeVoiceChanger(ctk.CTk):
             text="Kecepatan Artikulasi:",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLOR_TEXT_MUTED
-        ).grid(row=3, column=1, padx=(10, 18), pady=(4, 2), sticky="w")
+        ).grid(row=3, column=1, padx=(10, 18), pady=(2, 2), sticky="w")
 
         self.rate_opt = ctk.CTkOptionMenu(
             dev_card,
             values=["Normal (+0%)", "Cepat (+15%)", "Sangat Cepat (+30%)", "Lambat (-10%)"],
             corner_radius=8,
-            height=36,
+            height=34,
             fg_color="#212536",
             button_color="#2b3047",
             button_hover_color="#3c4365",
             text_color=COLOR_TEXT_MAIN,
             dropdown_fg_color="#1d2030",
-            dropdown_text_color=COLOR_TEXT_MAIN
+            dropdown_text_color=COLOR_TEXT_MAIN,
+            command=self.on_rate_changed_sync
         )
-        self.rate_opt.grid(row=4, column=1, padx=(10, 18), pady=(0, 16), sticky="ew")
+        self.rate_opt.grid(row=4, column=1, padx=(10, 18), pady=(0, 14), sticky="ew")
         self.rate_opt.set("Normal (+0%)")
 
+        # Silence & Punctuation Card
         silence_card = ctk.CTkFrame(
-            self,
+            self.page_streaming,
             fg_color=COLOR_CARD,
             corner_radius=14,
             border_width=1,
             border_color=COLOR_CARD_BORDER
         )
-        silence_card.grid(row=2, column=0, padx=22, pady=6, sticky="ew")
+        silence_card.grid(row=1, column=0, padx=22, pady=4, sticky="ew")
         silence_card.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkLabel(
@@ -327,7 +450,7 @@ class RealtimeVoiceChanger(ctk.CTk):
             text="Deteksi Jeda Hening (Selesai Bicara):",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLOR_TEXT_MUTED
-        ).grid(row=0, column=0, padx=(18, 10), pady=(12, 2), sticky="w")
+        ).grid(row=0, column=0, padx=(18, 10), pady=(10, 2), sticky="w")
 
         self.pause_opt = ctk.CTkOptionMenu(
             silence_card,
@@ -338,19 +461,20 @@ class RealtimeVoiceChanger(ctk.CTk):
                 "2.0 detik (Sangat Lambat)"
             ],
             corner_radius=8,
-            height=36,
+            height=34,
             fg_color="#212536",
             button_color="#2b3047",
             button_hover_color="#3c4365",
             text_color=COLOR_TEXT_MAIN,
             dropdown_fg_color="#1d2030",
-            dropdown_text_color=COLOR_TEXT_MAIN
+            dropdown_text_color=COLOR_TEXT_MAIN,
+            command=lambda e: self.save_config()
         )
-        self.pause_opt.grid(row=1, column=0, padx=(18, 10), pady=(0, 14), sticky="ew")
+        self.pause_opt.grid(row=1, column=0, padx=(18, 10), pady=(0, 12), sticky="ew")
         self.pause_opt.set("1.2 detik (Standar Alami)")
 
         switch_frame = ctk.CTkFrame(silence_card, fg_color="transparent")
-        switch_frame.grid(row=0, column=1, rowspan=2, padx=(10, 18), pady=(14, 14), sticky="ew")
+        switch_frame.grid(row=0, column=1, rowspan=2, padx=(10, 18), pady=(10, 12), sticky="ew")
 
         ctk.CTkLabel(
             switch_frame,
@@ -368,27 +492,29 @@ class RealtimeVoiceChanger(ctk.CTk):
             text_color=COLOR_TEXT_MAIN,
             progress_color=COLOR_PRIMARY,
             button_color="#ffffff",
-            button_hover_color="#e0e7ff"
+            button_hover_color="#e0e7ff",
+            command=self.save_config
         )
         self.chk_auto_comma.pack(anchor="w", pady=(6, 0))
 
+        # Transcript Log Card
         log_card = ctk.CTkFrame(
-            self,
+            self.page_streaming,
             fg_color=COLOR_CARD,
             corner_radius=14,
             border_width=1,
             border_color=COLOR_CARD_BORDER
         )
-        log_card.grid(row=3, column=0, padx=22, pady=6, sticky="nsew")
+        log_card.grid(row=2, column=0, padx=22, pady=4, sticky="nsew")
         log_card.grid_columnconfigure(0, weight=1)
         log_card.grid_rowconfigure(1, weight=1)
 
         ctk.CTkLabel(
             log_card,
-            text="TRANSKRIP PERCAKAPAN",
+            text="TRANSKRIP PERCAKAPAN REAL-TIME",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color="#818cf8"
-        ).grid(row=0, column=0, padx=18, pady=(12, 6), sticky="w")
+        ).grid(row=0, column=0, padx=18, pady=(10, 4), sticky="w")
 
         self.txt_log = ctk.CTkTextbox(
             log_card,
@@ -400,29 +526,501 @@ class RealtimeVoiceChanger(ctk.CTk):
             border_color="#202436",
             corner_radius=10
         )
-        self.txt_log.grid(row=1, column=0, padx=14, pady=(0, 14), sticky="nsew")
-        self.txt_log.insert("end", "Klik Mulai Streaming lalu bicaralah ke mikrofon...\n\n")
+        self.txt_log.grid(row=1, column=0, padx=14, pady=(0, 12), sticky="nsew")
+        self.txt_log.insert("end", "Klik 'Mulai Streaming' lalu bicaralah ke mikrofon Anda...\n\n")
         self.txt_log.configure(state="disabled")
 
+        # Bottom Streaming Control Button
         self.btn_control = ctk.CTkButton(
-            self,
+            self.page_streaming,
             text="▶  Mulai Streaming",
             command=self.toggle_process,
-            height=50,
+            height=48,
             corner_radius=12,
-            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             fg_color=COLOR_PRIMARY,
             hover_color=COLOR_PRIMARY_HOVER,
             text_color="#ffffff"
         )
-        self.btn_control.grid(row=4, column=0, padx=22, pady=(10, 20), sticky="ew")
+        self.btn_control.grid(row=3, column=0, padx=22, pady=(8, 16), sticky="ew")
 
         self.mic_cb.bind("<<ComboboxSelected>>", lambda e: self.save_config())
-        self.speaker_cb.bind("<<ComboboxSelected>>", lambda e: self.save_config())
-        self.voice_opt.configure(command=lambda e: self.save_config())
-        self.rate_opt.configure(command=lambda e: self.save_config())
-        self.pause_opt.configure(command=lambda e: self.save_config())
-        self.chk_auto_comma.configure(command=self.save_config)
+        self.speaker_cb.bind("<<ComboboxSelected>>", self.on_speaker_changed_sync)
+
+    def setup_tts_page(self):
+        self.page_tts = ctk.CTkFrame(self.container, fg_color="transparent")
+        self.page_tts.grid_columnconfigure(0, weight=1)
+        self.page_tts.grid_rowconfigure(1, weight=1)
+
+        # Voice & Output Settings Card for TTS
+        tts_settings_card = ctk.CTkFrame(
+            self.page_tts,
+            fg_color=COLOR_CARD,
+            corner_radius=14,
+            border_width=1,
+            border_color=COLOR_CARD_BORDER
+        )
+        tts_settings_card.grid(row=0, column=0, padx=22, pady=(0, 6), sticky="ew")
+        tts_settings_card.grid_columnconfigure((0, 1, 2), weight=1)
+
+        ctk.CTkLabel(
+            tts_settings_card,
+            text="PENGATURAN SUARA & OUTPUT AUDIO",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#818cf8"
+        ).grid(row=0, column=0, columnspan=3, padx=18, pady=(12, 6), sticky="w")
+
+        ctk.CTkLabel(
+            tts_settings_card,
+            text="Karakter Suara (Voice):",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
+        ).grid(row=1, column=0, padx=(18, 8), pady=(2, 2), sticky="w")
+
+        self.tts_voice_opt = ctk.CTkOptionMenu(
+            tts_settings_card,
+            values=list(self.voices.keys()),
+            corner_radius=8,
+            height=34,
+            fg_color="#212536",
+            button_color="#2b3047",
+            button_hover_color="#3c4365",
+            text_color=COLOR_TEXT_MAIN,
+            dropdown_fg_color="#1d2030",
+            dropdown_text_color=COLOR_TEXT_MAIN,
+            command=self.on_tts_voice_changed_sync
+        )
+        self.tts_voice_opt.grid(row=2, column=0, padx=(18, 8), pady=(0, 14), sticky="ew")
+        self.tts_voice_opt.set("Gadis (Wanita - Indonesia)")
+
+        ctk.CTkLabel(
+            tts_settings_card,
+            text="Output Audio:",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
+        ).grid(row=1, column=1, padx=(8, 8), pady=(2, 2), sticky="w")
+
+        self.tts_speaker_cb = ttk.Combobox(
+            tts_settings_card,
+            values=self.speaker_list if self.speaker_list else ["Tidak ada output ditemukan"],
+            style="Dark.TCombobox",
+            state="readonly",
+            height=12
+        )
+        self.tts_speaker_cb.grid(row=2, column=1, padx=(8, 8), pady=(0, 14), sticky="ew")
+        self.set_default_device(self.tts_speaker_cb, is_input=False)
+        self.tts_speaker_cb.bind("<<ComboboxSelected>>", self.on_tts_speaker_changed_sync)
+
+        ctk.CTkLabel(
+            tts_settings_card,
+            text="Kecepatan Artikulasi:",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLOR_TEXT_MUTED
+        ).grid(row=1, column=2, padx=(8, 18), pady=(2, 2), sticky="w")
+
+        self.tts_rate_opt = ctk.CTkOptionMenu(
+            tts_settings_card,
+            values=["Normal (+0%)", "Cepat (+15%)", "Sangat Cepat (+30%)", "Lambat (-10%)"],
+            corner_radius=8,
+            height=34,
+            fg_color="#212536",
+            button_color="#2b3047",
+            button_hover_color="#3c4365",
+            text_color=COLOR_TEXT_MAIN,
+            dropdown_fg_color="#1d2030",
+            dropdown_text_color=COLOR_TEXT_MAIN,
+            command=self.on_tts_rate_changed_sync
+        )
+        self.tts_rate_opt.grid(row=2, column=2, padx=(8, 18), pady=(0, 14), sticky="ew")
+        self.tts_rate_opt.set("Normal (+0%)")
+
+        # Text Input Card
+        text_card = ctk.CTkFrame(
+            self.page_tts,
+            fg_color=COLOR_CARD,
+            corner_radius=14,
+            border_width=1,
+            border_color=COLOR_CARD_BORDER
+        )
+        text_card.grid(row=1, column=0, padx=22, pady=4, sticky="nsew")
+        text_card.grid_columnconfigure(0, weight=1)
+        text_card.grid_rowconfigure(1, weight=1)
+
+        text_header_row = ctk.CTkFrame(text_card, fg_color="transparent")
+        text_header_row.grid(row=0, column=0, padx=18, pady=(12, 6), sticky="ew")
+        text_header_row.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            text_header_row,
+            text="MASUKKAN TEKS UNTUK DISUARAKAN",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#818cf8"
+        ).grid(row=0, column=0, sticky="w")
+
+        quick_tools = ctk.CTkFrame(text_header_row, fg_color="transparent")
+        quick_tools.grid(row=0, column=1, sticky="e")
+
+        ctk.CTkButton(
+            quick_tools,
+            text="📋 Tempel",
+            width=70,
+            height=26,
+            corner_radius=6,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            fg_color="#212536",
+            hover_color="#2b3047",
+            text_color=COLOR_TEXT_MAIN,
+            command=self.paste_to_tts
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            quick_tools,
+            text="💬 Contoh",
+            width=70,
+            height=26,
+            corner_radius=6,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            fg_color="#212536",
+            hover_color="#2b3047",
+            text_color=COLOR_TEXT_MAIN,
+            command=self.insert_sample_tts
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            quick_tools,
+            text="🗑️ Hapus",
+            width=65,
+            height=26,
+            corner_radius=6,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            fg_color="#212536",
+            hover_color="#3c2025",
+            text_color="#f87171",
+            command=self.clear_tts_input
+        ).pack(side="left")
+
+        self.txt_tts_input = ctk.CTkTextbox(
+            text_card,
+            wrap="word",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color="#0f111a",
+            text_color="#f1f5f9",
+            border_width=1,
+            border_color="#202436",
+            corner_radius=10
+        )
+        self.txt_tts_input.grid(row=1, column=0, padx=14, pady=(0, 6), sticky="nsew")
+        self.txt_tts_input.insert("1.0", "Halo semuanya! Selamat datang di speech2google. Ketik teks apa saja di sini untuk disuarakan ke perangkat output Anda.")
+        self.txt_tts_input.bind("<KeyRelease>", self.update_tts_counter)
+
+        bottom_text_info = ctk.CTkFrame(text_card, fg_color="transparent")
+        bottom_text_info.grid(row=2, column=0, padx=18, pady=(0, 10), sticky="ew")
+
+        self.lbl_char_counter = ctk.CTkLabel(
+            bottom_text_info,
+            text="0 karakter • 0 kata",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLOR_TEXT_MUTED
+        )
+        self.lbl_char_counter.pack(side="left")
+
+        self.lbl_tts_status = ctk.CTkLabel(
+            bottom_text_info,
+            text="● Siap memutar suara",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#94a3b8"
+        )
+        self.lbl_tts_status.pack(side="right")
+        self.update_tts_counter()
+
+        # Bottom Actions Bar for TTS
+        tts_actions_frame = ctk.CTkFrame(self.page_tts, fg_color="transparent")
+        tts_actions_frame.grid(row=2, column=0, padx=22, pady=(8, 16), sticky="ew")
+        tts_actions_frame.grid_columnconfigure(0, weight=2)
+        tts_actions_frame.grid_columnconfigure(1, weight=1)
+
+        self.btn_tts_play = ctk.CTkButton(
+            tts_actions_frame,
+            text="▶  Putar Suara ke Output",
+            command=self.toggle_tts_playback,
+            height=48,
+            corner_radius=12,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            text_color="#ffffff"
+        )
+        self.btn_tts_play.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+
+        self.btn_tts_save = ctk.CTkButton(
+            tts_actions_frame,
+            text="💾  Simpan ke File (.mp3)",
+            command=self.save_tts_file,
+            height=48,
+            corner_radius=12,
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            fg_color="#212536",
+            hover_color="#2b3047",
+            border_width=1,
+            border_color="#2e344e",
+            text_color=COLOR_TEXT_MAIN
+        )
+        self.btn_tts_save.grid(row=0, column=1, sticky="ew")
+
+    # Sync handlers between pages
+    def on_voice_changed_sync(self, choice):
+        self.tts_voice_opt.set(choice)
+        self.save_config()
+
+    def on_tts_voice_changed_sync(self, choice):
+        self.voice_opt.set(choice)
+        self.save_config()
+
+    def on_rate_changed_sync(self, choice):
+        self.tts_rate_opt.set(choice)
+        self.save_config()
+
+    def on_tts_rate_changed_sync(self, choice):
+        self.rate_opt.set(choice)
+        self.save_config()
+
+    def on_speaker_changed_sync(self, event=None):
+        idx = self.speaker_cb.current()
+        if idx >= 0:
+            self.tts_speaker_cb.current(idx)
+        self.save_config()
+
+    def on_tts_speaker_changed_sync(self, event=None):
+        idx = self.tts_speaker_cb.current()
+        if idx >= 0:
+            self.speaker_cb.current(idx)
+        self.save_config()
+
+    # TTS Helper actions
+    def clear_tts_input(self):
+        self.txt_tts_input.delete("1.0", "end")
+        self.update_tts_counter()
+
+    def paste_to_tts(self):
+        try:
+            clipboard_text = self.clipboard_get()
+            if clipboard_text:
+                self.txt_tts_input.insert("insert", clipboard_text)
+                self.update_tts_counter()
+        except Exception:
+            pass
+
+    def insert_sample_tts(self):
+        sample = "Halo semuanya! Selamat datang di speech2google. Ini adalah contoh suara natural berkecepatan tinggi yang dihasilkan secara real-time."
+        self.txt_tts_input.delete("1.0", "end")
+        self.txt_tts_input.insert("1.0", sample)
+        self.update_tts_counter()
+
+    def update_tts_counter(self, event=None):
+        text = self.txt_tts_input.get("1.0", "end-1c")
+        chars = len(text)
+        words = len(text.split()) if text.strip() else 0
+        self.lbl_char_counter.configure(text=f"{chars} karakter • {words} kata")
+
+    def toggle_tts_playback(self):
+        if not self.tts_is_playing:
+            text = self.txt_tts_input.get("1.0", "end-1c").strip()
+            if not text:
+                messagebox.showwarning("Teks Kosong", "Silakan masukkan teks yang ingin disuarakan.")
+                return
+
+            if edge_tts is None or av is None:
+                messagebox.showerror(
+                    "Pustaka Belum Lengkap",
+                    "Pustaka 'edge-tts' atau 'av' belum terdeteksi.\nSilakan jalankan di terminal:\npip install -r requirements.txt"
+                )
+                return
+
+            try:
+                speaker_id = int(self.tts_speaker_cb.get().split(":")[0])
+            except Exception:
+                messagebox.showerror("Error", "Silakan pilih perangkat output audio terlebih dahulu.")
+                return
+
+            selected_voice_key = self.tts_voice_opt.get()
+            voice_id = self.voices.get(selected_voice_key, "id-ID-GadisNeural")
+
+            rate_map = {
+                "Normal (+0%)": "+0%",
+                "Cepat (+15%)": "+15%",
+                "Sangat Cepat (+30%)": "+30%",
+                "Lambat (-10%)": "-10%"
+            }
+            speech_rate = rate_map.get(self.tts_rate_opt.get(), "+0%")
+
+            self.tts_is_playing = True
+            self.btn_tts_play.configure(
+                text="⏹  Hentikan Suara",
+                fg_color=COLOR_DANGER,
+                hover_color=COLOR_DANGER_HOVER
+            )
+            self.lbl_tts_status.configure(text="● Sedang menyuarakan...", text_color="#60a5fa")
+            self.set_status_badge("MEMUTAR TTS...", "streaming")
+
+            self.tts_thread = threading.Thread(
+                target=self._run_tts_playback,
+                args=(text, voice_id, speech_rate, speaker_id),
+                daemon=True
+            )
+            self.tts_thread.start()
+        else:
+            self.tts_is_playing = False
+            self.btn_tts_play.configure(
+                text="▶  Putar Suara ke Output",
+                fg_color=COLOR_PRIMARY,
+                hover_color=COLOR_PRIMARY_HOVER
+            )
+            self.lbl_tts_status.configure(text="● Pemutaran dihentikan", text_color="#f87171")
+            self.set_status_badge("TTS DIHENTIKAN", "stopped")
+
+    def _run_tts_playback(self, text, voice_id, speech_rate, speaker_id):
+        t_start = time.time()
+        try:
+            if voice_id.startswith("gtts:"):
+                lang = voice_id.split(":")[1]
+                self._play_gtts_direct(text, lang, speaker_id)
+            else:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self._async_stream_and_play_tts(text, voice_id, speech_rate, speaker_id))
+                finally:
+                    loop.close()
+            t_total = time.time() - t_start
+            self.after(0, lambda: self.lbl_tts_status.configure(
+                text=f"● Selesai diputar ({t_total:.2f}s)",
+                text_color="#34d399"
+            ))
+        except Exception as e:
+            self.after(0, lambda: self.lbl_tts_status.configure(
+                text=f"● Error: {str(e)[:40]}",
+                text_color="#f87171"
+            ))
+        finally:
+            self.tts_is_playing = False
+            self.after(0, self._reset_tts_ui)
+
+    def _play_gtts_direct(self, text, lang, speaker_id):
+        tts = gtts.gTTS(text=text, lang=lang)
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        data = fp.getvalue()
+        codec = av.CodecContext.create('mp3', 'r')
+        with sd.OutputStream(
+            samplerate=24000,
+            channels=1,
+            dtype='int16',
+            device=speaker_id,
+            latency='low'
+        ) as stream:
+            for packet in codec.parse(data):
+                if not self.tts_is_playing:
+                    break
+                for frame in codec.decode(packet):
+                    if not self.tts_is_playing:
+                        return
+                    pcm_data = frame.to_ndarray().T
+                    stream.write(pcm_data)
+            for frame in codec.decode():
+                if not self.tts_is_playing:
+                    return
+                pcm_data = frame.to_ndarray().T
+                stream.write(pcm_data)
+
+    def _reset_tts_ui(self):
+        self.btn_tts_play.configure(
+            text="▶  Putar Suara ke Output",
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER
+        )
+        if self.active_tab == "tts":
+            self.set_status_badge("TTS SIAP", "idle")
+
+    async def _async_stream_and_play_tts(self, text, voice, rate, speaker_id):
+        comm = edge_tts.Communicate(text, voice=voice, rate=rate)
+        codec = av.CodecContext.create('mp3', 'r')
+
+        with sd.OutputStream(
+            samplerate=24000,
+            channels=1,
+            dtype='int16',
+            device=speaker_id,
+            latency='low'
+        ) as stream:
+            async for chunk in comm.stream():
+                if not self.tts_is_playing:
+                    break
+                if chunk['type'] == 'audio':
+                    packets = codec.parse(chunk['data'])
+                    for packet in packets:
+                        frames = codec.decode(packet)
+                        for frame in frames:
+                            if not self.tts_is_playing:
+                                return
+                            pcm_data = frame.to_ndarray().T
+                            stream.write(pcm_data)
+
+            for frame in codec.decode():
+                if not self.tts_is_playing:
+                    return
+                pcm_data = frame.to_ndarray().T
+                stream.write(pcm_data)
+
+    def save_tts_file(self):
+        text = self.txt_tts_input.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showwarning("Teks Kosong", "Silakan masukkan teks yang ingin disimpan.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".mp3",
+            filetypes=[("File Audio MP3", "*.mp3"), ("Semua File", "*.*")],
+            title="Simpan Suara ke File MP3"
+        )
+        if not file_path:
+            return
+
+        selected_voice_key = self.tts_voice_opt.get()
+        voice_id = self.voices.get(selected_voice_key, "id-ID-GadisNeural")
+
+        rate_map = {
+            "Normal (+0%)": "+0%",
+            "Cepat (+15%)": "+15%",
+            "Sangat Cepat (+30%)": "+30%",
+            "Lambat (-10%)": "-10%"
+        }
+        speech_rate = rate_map.get(self.tts_rate_opt.get(), "+0%")
+
+        self.lbl_tts_status.configure(text="● Menyimpan ke MP3...", text_color="#fbbf24")
+
+        def _save_worker():
+            try:
+                if voice_id.startswith("gtts:"):
+                    lang = voice_id.split(":")[1]
+                    tts = gtts.gTTS(text=text, lang=lang)
+                    tts.save(file_path)
+                else:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    comm = edge_tts.Communicate(text, voice=voice_id, rate=speech_rate)
+                    loop.run_until_complete(comm.save(file_path))
+                    loop.close()
+                self.after(0, lambda: self.lbl_tts_status.configure(
+                    text=f"● Berhasil disimpan: {os.path.basename(file_path)}",
+                    text_color="#34d399"
+                ))
+            except Exception as e:
+                self.after(0, lambda: self.lbl_tts_status.configure(
+                    text=f"● Gagal simpan: {str(e)[:40]}",
+                    text_color="#f87171"
+                ))
+
+        threading.Thread(target=_save_worker, daemon=True).start()
 
     def set_status_badge(self, text, state="idle"):
         """Mengubah pill status badge dengan warna indikator modern"""
@@ -446,7 +1044,7 @@ class RealtimeVoiceChanger(ctk.CTk):
         self.after(0, _append)
 
     def get_device_names(self, is_input=True):
-        """Mengambil nama perangkat audio khusus MME (Multimedia) seperti Voicemeeter agar ringkas & bebas duplikasi"""
+        """Mengambil nama perangkat audio khusus MME (Multimedia) agar ringkas dan bebas duplikasi"""
         device_names = []
         try:
             hostapis = sd.query_hostapis()
@@ -459,7 +1057,6 @@ class RealtimeVoiceChanger(ctk.CTk):
             mme_idx = 0
 
         for i, dev in enumerate(self.devices):
-            # Filter hanya perangkat dengan hostapi == MME
             if dev.get('hostapi') == mme_idx:
                 channels = dev['max_input_channels'] if is_input else dev['max_output_channels']
                 if channels > 0:
@@ -637,7 +1234,6 @@ class RealtimeVoiceChanger(ctk.CTk):
             if not self.is_running:
                 break
 
-            # 2. Proses Streaming TTS & Playback langsung ke Sounddevice
             self.set_status_badge("STREAMING SUARA KE OUTPUT...", "streaming")
             try:
                 self.stream_tts_to_speaker(teks_hasil, voice_id, speech_rate, speaker_id)
@@ -649,7 +1245,7 @@ class RealtimeVoiceChanger(ctk.CTk):
         self.set_status_badge("PROGRAM DIHENTIKAN", "stopped")
 
     def split_audio_by_pauses(self, audio, min_silence_sec=0.35, energy_threshold=120):
-        """Mendeteksi jeda hening / nafas di tengah percakapan untuk disisipkan koma"""
+        """Mendeteksi jeda hening di tengah percakapan untuk disisipkan koma"""
         try:
             raw_data = audio.get_raw_data()
             samples = np.frombuffer(raw_data, dtype=np.int16)
@@ -727,13 +1323,44 @@ class RealtimeVoiceChanger(ctk.CTk):
         return text
 
     def stream_tts_to_speaker(self, text, voice, rate, speaker_id):
-        """Streaming Edge-TTS langsung ke PyAV -> sounddevice.OutputStream"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self._async_stream_and_play(text, voice, rate, speaker_id))
-        finally:
-            loop.close()
+        """Streaming Edge-TTS atau gTTS langsung ke PyAV -> sounddevice.OutputStream"""
+        if voice.startswith("gtts:"):
+            lang = voice.split(":")[1]
+            self._stream_gtts_to_speaker(text, lang, speaker_id)
+        else:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._async_stream_and_play(text, voice, rate, speaker_id))
+            finally:
+                loop.close()
+
+    def _stream_gtts_to_speaker(self, text, lang, speaker_id):
+        tts = gtts.gTTS(text=text, lang=lang)
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        data = fp.getvalue()
+        codec = av.CodecContext.create('mp3', 'r')
+        with sd.OutputStream(
+            samplerate=24000,
+            channels=1,
+            dtype='int16',
+            device=speaker_id,
+            latency='low'
+        ) as stream:
+            for packet in codec.parse(data):
+                if not self.is_running:
+                    break
+                for frame in codec.decode(packet):
+                    if not self.is_running:
+                        return
+                    pcm_data = frame.to_ndarray().T
+                    stream.write(pcm_data)
+            for frame in codec.decode():
+                if not self.is_running:
+                    return
+                pcm_data = frame.to_ndarray().T
+                stream.write(pcm_data)
 
     async def _async_stream_and_play(self, text, voice, rate, speaker_id):
         comm = edge_tts.Communicate(text, voice=voice, rate=rate)
@@ -768,6 +1395,7 @@ class RealtimeVoiceChanger(ctk.CTk):
     def on_close(self):
         self.save_config()
         self.is_running = False
+        self.tts_is_playing = False
         self.destroy()
 
 if __name__ == "__main__":
